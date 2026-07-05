@@ -139,6 +139,7 @@ expect - see [Known Issues](#known-issues).
       - [Flag `FF_KANIKO_BUILDKIT_ARG_ENV_PRECEDENCE`](#flag-ff_kaniko_buildkit_arg_env_precedence)
       - [Flag `FF_KANIKO_INFER_CROSS_STAGE_CACHE_KEY`](#flag-ff_kaniko_infer_cross_stage_cache_key)
       - [Flag `FF_KANIKO_CACHE_LOOKAHEAD`](#flag-ff_kaniko_cache_lookahead)
+      - [Flag `FF_KANIKO_ROLLING_CACHE_KEY`](#flag-ff_kaniko_rolling_cache_key)
       - [Flag `FF_KANIKO_CACHE_PROBE_AFTER_MISS`](#flag-ff_kaniko_cache_probe_after_miss)
       - [Flag `FF_KANIKO_WARMER_CACHE_LOCK`](#flag-ff_kaniko_warmer_cache_lock)
       - [Flag `FF_KANIKO_PRESERVE_MOUNTED_PATHS`](#flag-ff_kaniko_preserve_mounted_paths)
@@ -1240,6 +1241,13 @@ Becomes default in `v1.29.0`.
 #### Flag `FF_KANIKO_CACHE_LOOKAHEAD`
 
 Set this flag to `true` to run a precompute pass before the build loop that derives each stage's final cache key ahead of time. The build loop still recomputes each key during its own `optimize()` call and asserts that it matches the precomputed value. This is a developer assertion to verify the new precompute pass is correct, there is no benefit to enabling it in production.
+Defaults to `false`.
+
+#### Flag `FF_KANIKO_ROLLING_CACHE_KEY`
+
+By default the composite cache key is the hash of all key parts joined with `-`. Because `-` is also legal inside the parts, distinct part sequences can join to the same text, collide on the hash, and share a cached layer, so a build can silently receive another build's layer contents.
+Set this flag to `true` to fold every part into a fixed-size rolling state instead, `state = SHA256(state || part)`. The state has a fixed length, so the boundary to the next part is unambiguous and such collisions cannot occur. The state is also resumable, which shrinks the cross-stage cache pointers from the full key text to a digest.
+Enabling or disabling the flag changes every cache key and the next build rebuilds everything once.
 Defaults to `false`.
 
 #### Flag `FF_KANIKO_CACHE_PROBE_AFTER_MISS`
