@@ -508,11 +508,11 @@ func (s *stageBuilder) build(compositeKey CompositeCache, opts *config.KanikoOpt
 			return err
 		}
 
-		if err := util.Retry(retryFunc, opts.ImageFSExtractRetry, 1000); err != nil {
+		err := util.Retry(retryFunc, opts.ImageFSExtractRetry, 1000)
+		timing.DefaultRun.Stop(t)
+		if err != nil {
 			return fmt.Errorf("failed to get filesystem from image: %w", err)
 		}
-
-		timing.DefaultRun.Stop(t)
 		assert.Assert("executor.getfs.volumes-reset", len(util.Volumes()) == 0, "stageBuilder.build: getFSFromImage must reset volumes for stage %d", s.index)
 	} else {
 		logrus.Info("Skipping unpacking as no commands require it.")
@@ -521,20 +521,32 @@ func (s *stageBuilder) build(compositeKey CompositeCache, opts *config.KanikoOpt
 	initSnapshotTaken := false
 	if opts.SingleSnapshot {
 		t := timing.Start("Initial FS snapshot")
-		if err := snapshotter.Init(); err != nil {
+		err := snapshotter.Init()
+		timing.DefaultRun.Stop(t)
+		if err != nil {
 			return err
 		}
-		timing.DefaultRun.Stop(t)
 		initSnapshotTaken = true
 	}
 
 	cacheGroup := errgroup.Group{}
+	// cmdTimer outlives each iteration so the deferred stop catches error
+	// returns mid-command: an unended span is never exported, and the span
+	// of the failing command is the one most worth having in the trace.
+	// (Assertion panics still lose it: onAssertion flushes the provider
+	// before this defer runs.)
+	var cmdTimer *timing.Timer
+	defer func() {
+		if cmdTimer != nil {
+			timing.DefaultRun.Stop(cmdTimer)
+		}
+	}()
 	for index, command := range s.cmds {
 		if command == nil {
 			continue
 		}
 
-		t := timing.Start("Command: " + command.String())
+		cmdTimer = timing.Start("Command: " + command.String())
 
 		// If the command uses files from the context, add them.
 		files, err := command.FilesUsedFromContext(&s.cf.Config, s.args)
@@ -572,36 +584,42 @@ func (s *stageBuilder) build(compositeKey CompositeCache, opts *config.KanikoOpt
 			}
 		}()
 
-		if timing.Enabled() {
+		if timing.TracingEnabled() {
+			// Type switch, not string sniffing: a cached RUN replays a layer
+			// without executing, so it stays phase=kaniko.
 			phase := "kaniko"
-			if strings.HasPrefix(command.String(), "RUN ") {
+			switch command.(type) {
+			case *commands.RunCommand, *commands.RunMarkerCommand:
 				phase = "build"
 			}
 			attrs := []attribute.KeyValue{
 				attribute.String("kaniko.command", command.String()),
 				attribute.String("kaniko.command.hash", commandHash(s.index, command.String())),
 				attribute.String("kaniko.phase", phase),
-				attribute.Bool("kaniko.cache.hit", isCacheCommand),
 				attribute.Int("kaniko.instruction.index", index),
 				attribute.Int("kaniko.instruction.line", s.lines[index]),
-				attribute.String("kaniko.stage", strconv.Itoa(s.index)),
+				attribute.Int("kaniko.stage", s.index),
 			}
 			if opts.Cache {
+				// Present only when caching is on: absence is "caching off",
+				// false is "not replayed from cache" — not a miss rate.
+				attrs = append(attrs, attribute.Bool("kaniko.cache.hit", isCacheCommand))
 				if ck, herr := compositeKey.Hash(); herr == nil {
 					attrs = append(attrs, attribute.String("kaniko.cache.key", ck))
 				}
 			}
-			t.SetAttributes(attrs...)
+			cmdTimer.SetAttributes(attrs...)
 		}
 
 		if !initSnapshotTaken && !isCacheCommand && !command.ProvidesFilesToSnapshot() {
 			// Take initial snapshot if command does not expect to return
 			// a list of files.
 			t := timing.Start("Initial FS snapshot")
-			if err := snapshotter.Init(); err != nil {
+			err := snapshotter.Init()
+			timing.DefaultRun.Stop(t)
+			if err != nil {
 				return err
 			}
-			timing.DefaultRun.Stop(t)
 			initSnapshotTaken = true
 		}
 
@@ -609,7 +627,8 @@ func (s *stageBuilder) build(compositeKey CompositeCache, opts *config.KanikoOpt
 			return fmt.Errorf("failed to execute command: %w", err)
 		}
 		files = command.FilesToSnapshot()
-		timing.DefaultRun.Stop(t)
+		timing.DefaultRun.Stop(cmdTimer)
+		cmdTimer = nil
 
 		isLastCommand := index == len(s.cmds)-1
 		if !shouldTakeSnapshot(command.MetadataOnly(), isLastCommand, opts) {
@@ -1077,6 +1096,8 @@ func RenderStages(stages []config.KanikoStage, cacheInfo []*stageCacheInfo, opts
 // DoBuild executes building the Dockerfile
 func DoBuild(opts *config.KanikoOptions) (image v1.Image, retErr error) {
 	t := timing.Start("Total Build Time")
+	// Deferred so failed builds and --dryrun also record (and export) it.
+	defer timing.DefaultRun.Stop(t)
 	stageFinalCacheKeys := make(map[int]string)
 
 	stages, metaArgs, err := dockerfile.ParseStages(opts)
@@ -1355,7 +1376,6 @@ func DoBuild(opts *config.KanikoOptions) (image v1.Image, retErr error) {
 			pushImage = sourceImage
 		}
 		if stage.Final {
-			timing.DefaultRun.Stop(t)
 			// Final stage must be last, so by definition after Push stage.
 			assert.Assert("executor.build.push-image-nonnull", pushImage != nil, "pushImage is nil")
 			return pushImage, nil

@@ -586,8 +586,9 @@ func exit(err error) {
 
 // exits with the given error and exit code
 func exitWithCode(err error, exitCode int) {
-	tracing.Shutdown(err)
+	// Surface the error before the (bounded) trace flush, not after it.
 	fmt.Fprintln(os.Stderr, err)
+	tracing.Shutdown(err)
 	os.Exit(exitCode)
 }
 
