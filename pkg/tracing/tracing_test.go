@@ -17,6 +17,7 @@ limitations under the License.
 package tracing
 
 import (
+	"os"
 	"testing"
 
 	"github.com/osscontainertools/kaniko/pkg/config"
@@ -36,6 +37,13 @@ func TestSpanLimits(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			// Start from a hermetic env: an inherited OTEL_* limit on the
+			// runner would break the "unset" cases. t.Setenv registers the
+			// restore; Unsetenv makes the var truly absent.
+			for _, k := range []string{"OTEL_SPAN_ATTRIBUTE_VALUE_LENGTH_LIMIT", "OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT"} {
+				t.Setenv(k, "")
+				os.Unsetenv(k)
+			}
 			if tc.spanEnv != "" {
 				t.Setenv("OTEL_SPAN_ATTRIBUTE_VALUE_LENGTH_LIMIT", tc.spanEnv)
 			}
@@ -91,5 +99,9 @@ func TestBuildID(t *testing.T) {
 	// Fallback: no content => path-based, distinct from the content id.
 	if buildID("/a/Dockerfile", "", nil) == buildID("/a/Dockerfile", "", content) {
 		t.Error("path fallback must differ from the content-based id")
+	}
+	// A readable-but-empty Dockerfile is content-addressed, not path-based.
+	if buildID("/a/Dockerfile", "", []byte{}) != buildID("/b/Dockerfile", "", []byte{}) {
+		t.Error("empty readable Dockerfile must be content-addressed")
 	}
 }
